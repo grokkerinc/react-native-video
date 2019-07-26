@@ -167,9 +167,10 @@ static int const RCTVideoUnset = -1;
 - (CMTimeRange)playerItemSeekableTimeRange
 {
   AVPlayerItem *playerItem = [_player currentItem];
-  if (playerItem.status == AVPlayerItemStatusReadyToPlay)
+  NSArray<NSValue *> *seekableTimeRanges = [playerItem seekableTimeRanges];
+  if (playerItem.status == AVPlayerItemStatusReadyToPlay && seekableTimeRanges.count > 0)
   {
-    return [playerItem seekableTimeRanges].firstObject.CMTimeRangeValue;
+    return seekableTimeRanges.firstObject.CMTimeRangeValue;
   }
   
   return (kCMTimeRangeZero);
