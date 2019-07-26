@@ -278,7 +278,10 @@ export default class Video extends Component {
         type: source.type || '',
         mainVer: source.mainVer || 0,
         patchVer: source.patchVer || 0,
-        requestHeaders: source.headers ? this.stringsOnlyObject(source.headers) : {}
+        requestHeaders: source.headers ? this.stringsOnlyObject(source.headers) : {},
+        title: source.title || '',
+        artist: source.artist || '',
+        artworkUri: source.artworkUri || ''
       },
       onVideoLoadStart: this._onLoadStart,
       onVideoLoad: this._onLoad,

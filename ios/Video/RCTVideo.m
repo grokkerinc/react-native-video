@@ -6,6 +6,8 @@
 #include <MediaAccessibility/MediaAccessibility.h>
 #include <AVFoundation/AVFoundation.h>
 
+@import MediaPlayer;
+
 static NSString *const statusKeyPath = @"status";
 static NSString *const playbackLikelyToKeepUpKeyPath = @"playbackLikelyToKeepUp";
 static NSString *const playbackBufferEmptyKeyPath = @"playbackBufferEmpty";
@@ -74,6 +76,13 @@ static int const RCTVideoUnset = -1;
   NSString *_filterName;
   BOOL _filterEnabled;
   UIViewController * _presentingViewController;
+
+    /* Background playback */
+  UIImage *_nowPlayingImage;
+  NSString *_nowPlayingTitle;
+  NSString *_nowPlayingArtist;
+  NSString *_nowPlayingArtworkUri;
+
 #if __has_include(<react-native-video/RCTVideoCache.h>)
   RCTVideoCache * _videoCache;
 #endif
@@ -117,24 +126,147 @@ static int const RCTVideoUnset = -1;
                                              selector:@selector(applicationWillResignActive:)
                                                  name:UIApplicationWillResignActiveNotification
                                                object:nil];
-    
+
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(applicationDidEnterBackground:)
                                                  name:UIApplicationDidEnterBackgroundNotification
                                                object:nil];
-    
+
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(applicationWillEnterForeground:)
                                                  name:UIApplicationWillEnterForegroundNotification
                                                object:nil];
-    
+
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(audioRouteChanged:)
                                                  name:AVAudioSessionRouteChangeNotification
                                                object:nil];
   }
-  
+
+    [self setupRemoteTransportControl];
   return self;
+}
+
+- (void)setupRemoteTransportControl {
+    MPRemoteCommandCenter *commandCenter = [MPRemoteCommandCenter sharedCommandCenter];
+    [commandCenter.playCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
+        if (_paused) {
+            [self setPaused:false];
+            return MPRemoteCommandHandlerStatusSuccess;
+        }
+        return MPRemoteCommandHandlerStatusCommandFailed;
+    }];
+
+    [commandCenter.pauseCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
+        if (!_paused) {
+            [self setPaused:true];
+            return MPRemoteCommandHandlerStatusSuccess;
+        }
+        return MPRemoteCommandHandlerStatusCommandFailed;
+    }];
+
+    [commandCenter.skipBackwardCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
+        [self setCurrentTime:[self getCurrentTime] - 15];
+        [self setupNowPlaying];
+        return MPRemoteCommandHandlerStatusSuccess;
+    }];
+
+    [commandCenter.skipForwardCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
+        [self setCurrentTime:[self getCurrentTime] + 15];
+        [self setupNowPlaying];
+        return MPRemoteCommandHandlerStatusSuccess;
+    }];
+
+    [commandCenter.changePlaybackPositionCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
+
+        MPChangePlaybackPositionCommandEvent *playbackEvent = (MPChangePlaybackPositionCommandEvent *)event;
+        [self setCurrentTime:playbackEvent.positionTime];
+        [self setupNowPlaying];
+        return MPRemoteCommandHandlerStatusSuccess;
+    }];
+}
+
+- (void)enableRemoteCommandCenter:(BOOL)enabled {
+    MPRemoteCommandCenter *commandCenter = [MPRemoteCommandCenter sharedCommandCenter];
+    commandCenter.playCommand.enabled = enabled;
+    commandCenter.pauseCommand.enabled = enabled;
+    commandCenter.skipForwardCommand.enabled = enabled;
+    commandCenter.skipBackwardCommand.enabled = enabled;
+    commandCenter.changePlaybackPositionCommand.enabled = enabled;
+}
+
+- (void)setupNowPlaying {
+    if (!_playInBackground) {
+        [[MPNowPlayingInfoCenter defaultCenter] setNowPlayingInfo:nil];
+    }
+    CMTime currentTime = _player.currentTime;
+    const Float64 duration = CMTimeGetSeconds([self playerItemDuration]);
+    const Float64 currentTimeSecs = CMTimeGetSeconds(currentTime);
+    NSMutableDictionary *nowPlayingInfo = [NSMutableDictionary new];
+    [nowPlayingInfo setObject:_nowPlayingTitle forKey:MPMediaItemPropertyTitle];
+    [nowPlayingInfo setObject:_nowPlayingArtist forKey:MPMediaItemPropertyArtist];
+    [nowPlayingInfo setObject:[NSNumber numberWithFloat:currentTimeSecs] forKey:MPNowPlayingInfoPropertyElapsedPlaybackTime];
+    [nowPlayingInfo setObject:[NSNumber numberWithFloat:duration] forKey:MPMediaItemPropertyPlaybackDuration];
+    [nowPlayingInfo setObject:[NSNumber numberWithFloat:_rate] forKey:MPNowPlayingInfoPropertyPlaybackRate];
+    if (!_nowPlayingImage) {
+        NSURL *url = [NSURL URLWithString:_nowPlayingArtworkUri];
+        [[[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+            if (error != nil || data == nil) {
+                return;
+            }
+
+            UIImage *image = [UIImage imageWithData:data];
+            _nowPlayingImage = [self imageByCroppingImage:image toSize:CGSizeMake(image.size.height, image.size.height)];
+        }] resume];
+    } else {
+        MPMediaItemArtwork *mediaItemArtwork;
+        if (@available(iOS 10, *)) {
+            mediaItemArtwork = [[MPMediaItemArtwork alloc] initWithBoundsSize:_nowPlayingImage.size requestHandler:^UIImage * _Nonnull(CGSize size) {
+                return _nowPlayingImage;
+            }];
+        } else {
+            mediaItemArtwork = [[MPMediaItemArtwork alloc] initWithImage:_nowPlayingImage];
+        }
+        [nowPlayingInfo setObject:mediaItemArtwork forKey:MPMediaItemPropertyArtwork];
+    }
+    [[MPNowPlayingInfoCenter defaultCenter] setNowPlayingInfo:nowPlayingInfo];
+}
+
+/* https://stackoverflow.com/questions/14203951/cropping-center-square-of-uiimage */
+- (UIImage *)imageByCroppingImage:(UIImage *)image toSize:(CGSize)size
+{
+    double newCropWidth, newCropHeight;
+
+    //=== To crop more efficently =====//
+    if(image.size.width < image.size.height){
+        if (image.size.width < size.width) {
+            newCropWidth = size.width;
+        }
+        else {
+            newCropWidth = image.size.width;
+        }
+        newCropHeight = (newCropWidth * size.height)/size.width;
+    } else {
+        if (image.size.height < size.height) {
+            newCropHeight = size.height;
+        }
+        else {
+            newCropHeight = image.size.height;
+        }
+        newCropWidth = (newCropHeight * size.width)/size.height;
+    }
+    //==============================//
+
+    double x = image.size.width/2.0 - newCropWidth/2.0;
+    double y = image.size.height/2.0 - newCropHeight/2.0;
+
+    CGRect cropRect = CGRectMake(x, y, newCropWidth, newCropHeight);
+    CGImageRef imageRef = CGImageCreateWithImageInRect([image CGImage], cropRect);
+
+    UIImage *cropped = [UIImage imageWithCGImage:imageRef];
+    CGImageRelease(imageRef);
+
+    return cropped;
 }
 
 - (RCTVideoPlayerViewController*)createPlayerViewController:(AVPlayer*)player
@@ -143,7 +275,7 @@ static int const RCTVideoUnset = -1;
     viewController.showsPlaybackControls = YES;
     viewController.rctDelegate = self;
     viewController.preferredOrientation = _fullscreenOrientation;
-    
+
     viewController.view.frame = self.bounds;
     viewController.player = player;
     return viewController;
@@ -205,6 +337,7 @@ static int const RCTVideoUnset = -1;
   [[NSNotificationCenter defaultCenter] removeObserver:self];
   [self removePlayerLayer];
   [self removePlayerItemObservers];
+  [MPNowPlayingInfoCenter defaultCenter].nowPlayingInfo = nil;
   [_player removeObserver:self forKeyPath:playbackRate context:nil];
   [_player removeObserver:self forKeyPath:externalPlaybackActive context: nil];
 }
@@ -223,6 +356,7 @@ static int const RCTVideoUnset = -1;
 {
   if (_playInBackground) {
     // Needed to play sound in background. See https://developer.apple.com/library/ios/qa/qa1668/_index.html
+    [self setupNowPlaying];
     [_playerLayer setPlayer:nil];
     [_playerViewController setPlayer:nil];
   }
@@ -366,18 +500,21 @@ static int const RCTVideoUnset = -1;
         [_player removeObserver:self forKeyPath:externalPlaybackActive context:nil];
         _isExternalPlaybackActiveObserverRegistered = NO;
       }
-        
+
       _player = [AVPlayer playerWithPlayerItem:_playerItem];
       _player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
-        
+
       [_player addObserver:self forKeyPath:playbackRate options:0 context:nil];
       _playbackRateObserverRegistered = YES;
-      
+
       [_player addObserver:self forKeyPath:externalPlaybackActive options:0 context:nil];
       _isExternalPlaybackActiveObserverRegistered = YES;
-        
+
       [self addPlayerTimeObserver];
 
+      _nowPlayingTitle = [source objectForKey:@"title"];
+      _nowPlayingArtist = [source objectForKey:@"artist"];
+      _nowPlayingArtworkUri = [source objectForKey:@"artworkUri"];
       //Perform on next run loop, otherwise onVideoLoadStart is nil
       if (self.onVideoLoadStart) {
         id uri = [source objectForKey:@"uri"];
@@ -666,6 +803,7 @@ static int const RCTVideoUnset = -1;
       }
     } else if ([keyPath isEqualToString:playbackBufferEmptyKeyPath]) {
       _playerBufferEmpty = YES;
+      [self setupNowPlaying];
       self.onVideoBuffer(@{@"isBuffering": @(YES), @"target": self.reactTag});
     } else if ([keyPath isEqualToString:playbackLikelyToKeepUpKeyPath]) {
       // Continue playing (or not if paused) after being paused due to hitting an unbuffered zone.
@@ -673,6 +811,7 @@ static int const RCTVideoUnset = -1;
         [self setPaused:_paused];
       }
       _playerBufferEmpty = NO;
+      [self setupNowPlaying];
       self.onVideoBuffer(@{@"isBuffering": @(NO), @"target": self.reactTag});
     }
   } else if (object == _player) {
@@ -688,6 +827,7 @@ static int const RCTVideoUnset = -1;
         }
         _playbackStalled = NO;
       }
+      [self setupNowPlaying];
     }
     else if([keyPath isEqualToString:externalPlaybackActive]) {
         if(self.onVideoExternalPlaybackChange) {
@@ -799,6 +939,7 @@ static int const RCTVideoUnset = -1;
 - (void)setPlayInBackground:(BOOL)playInBackground
 {
   _playInBackground = playInBackground;
+  [self enableRemoteCommandCenter:_playInBackground];
 }
 
 - (void)setAllowsExternalPlayback:(BOOL)allowsExternalPlayback
